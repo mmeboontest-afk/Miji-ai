@@ -6,6 +6,7 @@ const {
   LINE_CHANNEL_SECRET,
   GEMINI_API_KEY,
   GEMINI_MODEL = 'gemma-2-27b-it', // ถ้าใช้ไม่ได้ ลอง gemma-3-27b-it
+  FALLBACK_MODELS = 'gemma-3-27b-it', // ลองตัวนี้ต่อถ้าโมเดลหลักใช้ไม่ได้
   NICKNAMES = 'มิจิ,miji,miju,มิจู,ปิง,ping,หนูมิจิ',
   ADMIN_KEY = '', // ถ้าตั้งไว้ ต้องเข้า /errors?key=ค่านี้
   PORT = 3000,
@@ -48,7 +49,7 @@ function getRoom(id) {
   return rooms.get(id);
 }
 
-async function askGemini(room, speaker, reason) {
+async function askGemini(room, speaker, reason, forced = false) {
   const chat = room.history.map((h) => `${h.name}: ${h.text}`).join('\n');
   const members = [...new Set(room.members.values())].join(', ');
   const prompt = `${SYSTEM}
@@ -60,21 +61,34 @@ async function askGemini(room, speaker, reason) {
 แชทล่าสุด:
 ${chat}
 
-มิจิควรตอบอะไร? (ถ้าไม่ควรพูด ตอบ SKIP)`;
+${forced ? 'ข้อความนี้พูดกับมิจิแน่นอน ห้ามตอบ SKIP ให้ตอบเหมือนคนคุยกันทั่วไป' : 'ถ้าไม่แน่ใจว่าพูดกับใคร ให้เอนไปทางตอบ ถ้าชัดเจนว่าพูดกับคนอื่นให้ SKIP'}
+มิจิควรตอบอะไร?`;
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 200, temperature: 0.8 },
-      }),
+  const models = [GEMINI_MODEL, ...FALLBACK_MODELS.split(',').map((m) => m.trim()).filter(Boolean)];
+  let data;
+  let lastErr;
+  for (const model of models) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 200, temperature: 0.8 },
+          }),
+        }
+      );
+      if (!res.ok) throw new Error(`${model} ${res.status}: ${await res.text()}`);
+      data = await res.json();
+      break;
+    } catch (e) {
+      lastErr = e;
+      logError('gemini', e);
     }
-  );
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
-  const data = await res.json();
+  }
+  if (!data) throw lastErr;
   return (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
 }
 
@@ -93,7 +107,7 @@ async function fetchName(event) {
   }
 }
 
-async function send(event, room, userId, text) {
+async function send(event, room, userId, text, forced = false) {
   const r = await client.replyMessage({
     replyToken: event.replyToken,
     messages: [{ type: 'text', text }],
@@ -102,7 +116,7 @@ async function send(event, room, userId, text) {
   if (botMsgIds.size > 2000) botMsgIds.clear();
   room.lastReply = Date.now();
   room.history.push({ name: 'มิจิ', text });
-  if (userId) room.active.set(userId, Date.now()); // คุยกับคนนี้อยู่ รีเซ็ตนับ 5 นาที
+  if (userId) room.active.set(userId, { ts: Date.now(), forced }); // คุยกับคนนี้อยู่ รีเซ็ตนับ 5 นาที
 }
 
 async function handleEvent(event) {
@@ -127,8 +141,9 @@ async function handleEvent(event) {
   const mentioned = event.message.mention?.mentionees?.some((m) => m.isSelf);
   const called = BOT_NAMES.some((n) => lower.includes(n));
   const quotedBot = event.message.quotedMessageId && botMsgIds.has(event.message.quotedMessageId);
-  const lastActive = room.active.get(userId) || 0;
-  const isActive = Date.now() - lastActive < ACTIVE_MS;
+  const act = room.active.get(userId);
+  const isActive = !!act && Date.now() - act.ts < ACTIVE_MS;
+  const mentionsOther = event.message.mention?.mentionees?.some((m) => !m.isSelf);
 
   try {
     // 1) ถูกเรียกชื่อ/แท็ก/กด Reply/แชทส่วนตัว
@@ -139,21 +154,24 @@ async function handleEvent(event) {
       rest = rest.replace(/[\s!?.,~ๆ@น้อง]+/g, '');
       if ((called || mentioned) && rest.length <= 2) {
         const ack = ACKS[Math.floor(Math.random() * ACKS.length)];
-        return send(event, room, userId, ack);
+        return send(event, room, userId, ack, true); // รอฟังประโยคถัดไปของคนนี้
       }
-      const reply = await askGemini(room, name, `${name} กำลังคุยกับมิจิโดยตรง`);
-      if (reply && !reply.toUpperCase().startsWith('SKIP')) return send(event, room, userId, reply);
+      const reply = await askGemini(room, name, `${name} กำลังคุยกับมิจิโดยตรง`, true);
+      if (reply && !reply.toUpperCase().startsWith('SKIP')) return send(event, room, userId, reply, false);
       return;
     }
 
     // 2) คนที่เพิ่งคุยกับมิจิ (ยังไม่เกิน 5 นาที) -> ให้ AI ตัดสินเองว่าพูดกับมิจิอยู่ไหม
     if (isActive) {
+      // ประโยคแรกหลังถูกเรียกชื่อ = ตอบแน่นอน (ยกเว้นแท็กคนอื่น)
+      const forced = act.forced && !mentionsOther;
       const reply = await askGemini(
         room,
         name,
-        `${name} เพิ่งคุยกับมิจิเมื่อไม่นานนี้ ตัดสินจากบริบทว่าข้อความล่าสุดนี้พูดกับมิจิต่อหรือพูดกับคนอื่นในกลุ่ม ถ้าพูดกับคนอื่นให้ SKIP`
+        `${name} เพิ่งคุยกับมิจิเมื่อไม่นานนี้ ข้อความล่าสุดน่าจะคุยต่อกับมิจิ`,
+        forced
       );
-      if (reply && !reply.toUpperCase().startsWith('SKIP')) return send(event, room, userId, reply);
+      if (reply && !reply.toUpperCase().startsWith('SKIP')) return send(event, room, userId, reply, false);
       return;
     }
 

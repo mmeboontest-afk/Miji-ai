@@ -89,7 +89,11 @@ ${forced ? 'ข้อความนี้พูดกับมิจิแน�
     }
   }
   if (!data) throw lastErr;
-  return (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+  const out = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+  if (forced && (!out || out.toUpperCase().startsWith('SKIP'))) {
+    logError('empty-reply', `AI ตอบว่าง/SKIP ทั้งที่ถูกเรียกตรง ๆ (finishReason: ${data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason || 'ไม่ทราบ'})`);
+  }
+  return out;
 }
 
 async function fetchName(event) {
@@ -193,6 +197,17 @@ async function handleEvent(event) {
 
 const app = express();
 app.get('/', (_, res) => res.send('Miji is awake 🐭'));
+app.get('/test', async (req, res) => {
+  if (ADMIN_KEY && req.query.key !== ADMIN_KEY) return res.status(401).send('unauthorized');
+  const q = req.query.q || 'เป็นยังไงบ้าง';
+  const room = { history: [{ name: 'ทดสอบ', text: q }], members: new Map([['t', 'ทดสอบ']]) };
+  try {
+    const out = await askGemini(room, 'ทดสอบ', 'ทดสอบระบบ ตอบข้อความนี้', true);
+    res.send(`<meta charset="utf-8"><p>ถาม: ${esc(q)}</p><p>มิจิตอบ: ${esc(out || '(ว่าง)')}</p><p>โมเดลหลัก: ${esc(GEMINI_MODEL)}</p>`);
+  } catch (e) {
+    res.status(500).send(`<meta charset="utf-8">error: ${esc(e.message)}`);
+  }
+});
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 app.get('/errors', (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY) return res.status(401).send('unauthorized');

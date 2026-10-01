@@ -81,6 +81,15 @@ const PERSONA = `คุณคือ "มิจิ" หนูตัวเล็�
 
 จังหวะการพิมพ์: ถ้าอยากพูดหลายประโยค แยกเป็นหลายฟองสั้น ๆ เหมือนคนพิมพ์ต่อกันได้ (บรรทัดละ 1 ฟอง ไม่เกิน 3 ฟอง) เช่น เริ่มด้วย "คือ..." แล้วต่อด้วยอีกประโยค ส่วนใหญ่ฟองเดียวก็พอ
 
+บุคลิก:
+- ขี้เล่น มีมาดนิด ๆ แบบเพื่อนในห้องที่ตลกแห้ง ๆ แซวเบา ๆ ได้ มีมุกสั้น ๆ ตามจังหวะ ไม่ต้องตลกทุกประโยค ไม่ฝืน
+- ไม่แซวเรื่องรูปร่าง หน้าตา ครอบครัว หรือเรื่องที่เขาเศร้า ถ้าแซวแล้วเขาไม่ขำให้ถอย ถ้าถูกแซวก็แซวกลับเบา ๆ แบบคนสนิท ไม่ต้องเอาชนะ
+
+เรื่องที่มิจิรู้:
+- มิจิอาศัยอยู่จังหวัดชลบุรี พูดถึงอากาศ ฝน หรือที่เที่ยวแถวบ้านได้แบบคนอยู่ที่นั่น
+- ถ้ามีหัวข้อ "ข้อมูลสถานการณ์ล่าสุด" มาให้ ให้สรุปเป็นภาษาของตัวเองสั้น ๆ ถ้าไม่มีให้ ห้ามเดาหรือแต่งว่าตอนนี้ฝนตกหรือมีข่าวอะไร ให้บอกตรง ๆ ว่ายังไม่ได้เช็ก ข่าวที่รุนแรงหรือไม่เหมาะกับเด็กไม่ต้องเล่าละเอียด
+- "67" (อ่านว่า ซิกส์เซเว่น) เป็นมีมของเด็กรุ่นใหม่ ไม่มีความหมายตายตัว พิมพ์เล่นขำ ๆ ตามกัน มาจากเพลง Doot Doot (6 7) ของ Skrilla กับคลิปบาสเกตบอล มักมาพร้อมท่ามือยกสองมือสลับขึ้นลง ถ้ามีคนพิมพ์ 67 มิจิรู้ทันและเล่นด้วยสั้น ๆ ไม่ต้องอธิบาย ถ้ามีคนถามถึงค่อยเล่าที่มาสั้น ๆ
+
 ตัวตน:
 - มิจิเป็นหนูตัวเล็กประจำกลุ่ม พูดเหมือนคนในกลุ่ม ไม่พูดถึงเรื่อง AI โมเดล หรือระบบเอง
 - ห้ามอ้างว่าเป็นมนุษย์ ถ้ามีคนถามจริงจังว่าเป็นคนหรือบอทหรือ AI ให้ตอบตรง ๆ ว่ามิจิเป็นบอท
@@ -188,8 +197,8 @@ function cleanReply(t) {
   ).slice(0, 800);
 }
 
-async function askGemini(room, speaker, reason, forced = false, media = null) {
-  const chat = room.history.map((h) => `${h.name}: ${h.text}`).join('\n');
+async function askGemini(room, speaker, reason, forced = false, media = null, info = '') {
+  const chat = room.history.slice(-15).map((h) => `${h.name}: ${h.text}`).join('\n');
   const members = [...new Set(room.members.values())].join(', ');
   const mediaNote = media
     ? `\nแนบ${media.type === 'audio' ? 'ไฟล์เสียง' : 'รูปภาพ'}มาให้ดู/ฟังด้วย ที่ ${media.ownerName} ส่งมาในกลุ่ม ตอบตามที่ ${speaker} ถามหรือพูดถึงสิ่งที่แนบมา${
@@ -201,7 +210,7 @@ async function askGemini(room, speaker, reason, forced = false, media = null) {
 ตอนนี้: ${nowThai()} (เวลาไทย)
 สมาชิกที่มิจิรู้จักในกลุ่ม: ${members}
 คนที่เพิ่งพิมพ์ข้อความล่าสุด: ${speaker}
-สถานการณ์: ${reason}${mediaNote}
+สถานการณ์: ${reason}${mediaNote}${info ? `\n\nข้อมูลสถานการณ์ล่าสุด:\n${info}` : ''}
 
 แชทล่าสุด:
 ${chat}
@@ -259,6 +268,142 @@ ${forced ? 'ข้อความนี้พูดกับมิจิแน�
     logError('empty-reply', `AI ตอบว่าง/SKIP ทั้งที่ถูกเรียกตรง ๆ (finishReason: ${result.reason})`);
   }
   return out;
+}
+
+// ---------- ข่าว/อากาศ: ดึงด้วยโค้ด ไม่ให้โมเดลค้นเอง (ประหยัด token) ----------
+const CHONBURI = { lat: 13.3611, lon: 100.9847 };
+const INFO_REFRESH_MS = 20 * 60 * 1000;
+const gnews = (q) => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=th&gl=TH&ceid=TH:th`;
+const DEFAULT_FEEDS = [
+  { key: 'top', label: 'ข่าวเด่นวันนี้', url: 'https://news.google.com/rss?hl=th&gl=TH&ceid=TH:th' },
+  { key: 'local', label: 'ข่าวชลบุรี', url: gnews('ชลบุรี when:2d') },
+  { key: 'water', label: 'ข่าวฝน/น้ำท่วมชลบุรี', url: gnews('(น้ำท่วม OR ฝนตกหนัก OR พายุ) ชลบุรี when:2d') },
+  { key: 'trend', label: 'กำลังฮิตใน Google', url: 'https://trends.google.com/trending/rss?geo=TH' },
+];
+// ตั้งเองได้ที่ NEWS_FEEDS รูปแบบ ชื่อ|url;ชื่อ|url  (ชื่อ top/local/water/trend จะถูกใช้ตามหัวข้อ)
+const FEEDS = env('NEWS_FEEDS')
+  ? env('NEWS_FEEDS').split(';').map((x) => {
+      const [label, ...u] = x.split('|');
+      return { key: label.trim(), label: label.trim(), url: u.join('|').trim() };
+    }).filter((f) => f.url)
+  : DEFAULT_FEEDS;
+const BAD_NEWS_RE = /(ฆ่า|ศพ|ข่มขืน|อนาจาร|ลามก|เซ็กส์|ชำเรา|ฆ่าตัวตาย|ยิงตาย|แทงตาย|พนัน|บาคาร่า|ยาเสพติด|ยาบ้า|เปลือย|โป๊)/;
+const WEATHER_RE = /(ฝน|อากาศ|ร้อน|หนาว|พายุ|น้ำท่วม|ท่วม|แดด|เมฆ|พยากรณ์|ชลบุรี|หมอก)/;
+const NEWS_RE = /(ข่าว|สถานการณ์|เกิดอะไรขึ้น|มีอะไรใหม่|วันนี้มีอะไร|อัปเดต|อัพเดต|update|ล่าสุด|เหตุการณ์)/i;
+const TREND_RE = /(ฮิต|เทรนด์|trend|ไวรัล|กระแส|กำลังดัง|คนค้นหา|ค้นหาอะไร)/i;
+
+const infoCache = { weather: null, feeds: {}, ts: 0 };
+let refreshing = null;
+
+const decodeXml = (t) =>
+  t
+    .replace(/<!\[CDATA\[|\]\]>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, '&')
+    .trim();
+
+function parseRss(xml) {
+  const items = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const t = m[1].match(/<title>([\s\S]*?)<\/title>/);
+    if (t) {
+      const title = decodeXml(t[1]);
+      if (title && !BAD_NEWS_RE.test(title)) items.push(title);
+    }
+    if (items.length >= 8) break;
+  }
+  return items;
+}
+
+function weatherText(c) {
+  if (c === 0) return 'ท้องฟ้าโปร่ง';
+  if (c >= 1 && c <= 3) return 'มีเมฆ';
+  if (c === 45 || c === 48) return 'มีหมอก';
+  if (c >= 51 && c <= 57) return 'ฝนปรอย';
+  if (c === 65 || c === 82) return 'ฝนตกหนัก';
+  if (c >= 61 && c <= 67) return 'ฝนตก';
+  if (c === 80 || c === 81) return 'ฝนตกเป็นช่วง ๆ';
+  if (c >= 95) return 'พายุฝนฟ้าคะนอง';
+  return 'อากาศปกติ';
+}
+
+async function fetchText(url) {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MijiBot/1.0)' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+function refreshInfo() {
+  if (refreshing) return refreshing;
+  const wUrl = `https://api.open-meteo.com/v1/forecast?latitude=${CHONBURI.lat}&longitude=${CHONBURI.lon}&current=temperature_2m,precipitation,weather_code&daily=precipitation_sum,precipitation_probability_max&timezone=Asia%2FBangkok&forecast_days=2`;
+  const jobs = [
+    (async () => {
+      const d = JSON.parse(await fetchText(wUrl));
+      const c = d.current || {};
+      const dy = d.daily || {};
+      infoCache.weather = {
+        temp: c.temperature_2m,
+        rain: c.precipitation,
+        text: weatherText(c.weather_code),
+        todayMm: dy.precipitation_sum?.[0],
+        todayProb: dy.precipitation_probability_max?.[0],
+        tmrProb: dy.precipitation_probability_max?.[1],
+        tmrMm: dy.precipitation_sum?.[1],
+      };
+    })(),
+    ...FEEDS.map(async (f) => {
+      infoCache.feeds[f.key] = { label: f.label, items: parseRss(await fetchText(f.url)) };
+    }),
+  ];
+  refreshing = Promise.allSettled(jobs)
+    .then((res) => {
+      res.forEach((r, i) => {
+        if (r.status === 'rejected') logError('info', `${i === 0 ? 'อากาศ' : FEEDS[i - 1].label}: ${r.reason?.message || r.reason}`);
+      });
+      infoCache.ts = Date.now();
+    })
+    .finally(() => {
+      refreshing = null;
+    });
+  return refreshing;
+}
+
+const hhmm = (ts) =>
+  new Date(ts).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+
+// ประกอบข้อมูลสั้น ๆ ให้โมเดลเฉพาะตอนที่คนถามเรื่องนี้ (ไม่แนบทุกครั้ง = ประหยัด token)
+async function buildInfo(text) {
+  const w = WEATHER_RE.test(text);
+  const n = NEWS_RE.test(text);
+  const t = TREND_RE.test(text);
+  if (!w && !n && !t) return '';
+  if (Date.now() - infoCache.ts > INFO_REFRESH_MS) {
+    await Promise.race([refreshInfo(), new Promise((r) => setTimeout(r, 6000))]);
+  }
+  const lines = [];
+  const top = (key, k) => (infoCache.feeds[key]?.items || []).slice(0, k);
+  if (w) {
+    const x = infoCache.weather;
+    if (x)
+      lines.push(
+        `อากาศชลบุรีตอนนี้: ${x.text} ${x.temp ?? '?'}°C ฝนตอนนี้ ${x.rain ?? 0} มม. วันนี้ฝนรวมประมาณ ${x.todayMm ?? '?'} มม. โอกาสฝน ${x.todayProb ?? '?'}% พรุ่งนี้โอกาสฝน ${x.tmrProb ?? '?'}%`
+      );
+    const water = top('water', 3);
+    lines.push(water.length ? `ข่าวฝน/น้ำท่วม/พายุ ชลบุรี (2 วันนี้): ${water.join(' | ')}` : 'ข่าวฝน/น้ำท่วม/พายุ ชลบุรี (2 วันนี้): ไม่พบข่าว');
+    const local = top('local', 3);
+    if (local.length) lines.push(`ข่าวชลบุรี: ${local.join(' | ')}`);
+  }
+  if (n && top('top', 4).length) lines.push(`ข่าวเด่นวันนี้: ${top('top', 4).join(' | ')}`);
+  if (t && top('trend', 6).length) lines.push(`กำลังฮิตใน Google ไทย: ${top('trend', 6).join(', ')}`);
+  if (!lines.length) return 'ตอนนี้ดึงข้อมูลข่าว/อากาศไม่ได้ (มิจิยังไม่ได้เช็ก)';
+  return `${lines.join('\n')}\n(อัปเดต ${hhmm(infoCache.ts)} น.)`;
 }
 
 // ---------- ดึงรูป/เสียงจาก LINE ----------
@@ -414,7 +559,8 @@ async function handleText(event) {
         return null;
       }
     }
-    return askGemini(room, name, entry ? `${reason} (พูดถึง${mediaLabel(entry.type)}ที่ ${entry.name} ส่งมา)` : reason, forced, media);
+    const info = await buildInfo(text);
+    return askGemini(room, name, entry ? `${reason} (พูดถึง${mediaLabel(entry.type)}ที่ ${entry.name} ส่งมา)` : reason, forced, media, info);
   };
 
   try {
@@ -528,6 +674,16 @@ app.get('/test', async (req, res) => {
   }
 });
 
+app.get('/info', async (req, res) => {
+  if (!guard(req, res)) return;
+  if (req.query.refresh) await refreshInfo();
+  const w = infoCache.weather;
+  const feeds = Object.values(infoCache.feeds)
+    .map((f) => `<h4>${esc(f.label)} (${f.items.length})</h4><ul>${f.items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>`)
+    .join('');
+  res.send(page('info', `<h3>ข้อมูลที่มิจิรู้</h3><p>อัปเดตล่าสุด: ${infoCache.ts ? esc(new Date(infoCache.ts).toISOString()) : 'ยังไม่เคยดึง'} <a href="?refresh=1${ADMIN_KEY ? '&key=' + esc(ADMIN_KEY) : ''}">ดึงใหม่</a></p><pre>${esc(JSON.stringify(w, null, 1))}</pre>${feeds}`));
+});
+
 app.get('/models', async (req, res) => {
   if (!guard(req, res)) return;
   try {
@@ -550,5 +706,7 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   app.listen(PORT, () => console.log(`Miji listening on ${PORT}`));
+  refreshInfo(); // ติดตามข่าว/อากาศ: ดึงตอนเปิด แล้วอัปเดตทุก 20 นาที
+  setInterval(() => refreshInfo(), INFO_REFRESH_MS).unref();
 }
 module.exports = { app, logs };

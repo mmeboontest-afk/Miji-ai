@@ -23,6 +23,9 @@ const TEXT_TIMEOUT_MS = 8000;
 const MEDIA_TIMEOUT_MS = 20000;
 const MEDIA_MAX_BYTES = 8 * 1024 * 1024;
 const MEDIA_HINT = /(รูป|ภาพ|เสียง|คลิป|ฟัง|ดู|นี่|นี้|พูดว่า|พูดอะไร|พูดไร|อ่าน|แปล|เมื่อกี้|ข้างบน)/;
+const LEAVE_RE = /(ออกไป|ไสหัว|ไม่ต้องมา|ไม่ต้องอยู่|ออกจากกลุ่ม|อย่ามายุ่ง|เตะ.{0,6}ออก|เอา.{0,8}ออก|ลบ.{0,6}(บอท|มิจิ)|หุบปาก|เงียบ ?ไป)/;
+const LEAVE_OKS = ['โอเค', 'โอเคค่ะ', 'ค่ะ ไม่รบกวนแล้วนะ', 'โอเค เข้าใจแล้ว'];
+const MUTE_MS = 15 * 60 * 1000;
 const ACKS = ['ว่าไงคะ?', 'คะ?', 'หืม?', 'อยู่นี่ ๆ', 'ว่ามาเลย', 'ว่าไง', 'อะไรเหรอ', 'ว่า?', 'มาแล้วนะ', 'คะ ว่ามา'];
 
 // ---------- log (ดูได้ที่หน้า /errors) ----------
@@ -53,7 +56,7 @@ const seenEvents = new Set();
 
 function getRoom(id) {
   if (!rooms.has(id))
-    rooms.set(id, { history: [], count: 0, lastReply: 0, active: new Map(), members: new Map(), media: [] });
+    rooms.set(id, { history: [], count: 0, lastReply: 0, active: new Map(), members: new Map(), media: [], muted: new Map() });
   return rooms.get(id);
 }
 
@@ -70,6 +73,13 @@ const PERSONA = `คุณคือ "มิจิ" หนูตัวเล็�
 - ถ้าไม่รู้ก็บอกว่าไม่รู้ตรง ๆ ไม่แต่งเรื่อง ถ้าเห็นต่างก็บอกตรง ๆ ได้อย่างนุ่มนวล
 - จับน้ำเสียงคนที่คุยด้วย ถ้าเขาเล่นมิจิก็เล่นด้วย ถ้าเขาจริงจังหรือเศร้า มิจิจริงใจและเบา ๆ ไม่ปลอบเว่อร์
 - ถามความรู้หรือให้ช่วยคิดเรื่องทั่วไป ตอบได้เหมือนเพื่อนที่เก่ง ใช้ภาษาเดียวกับที่เขาพิมพ์
+
+เวลามีคนโวยวาย ด่า หรือหาเรื่อง:
+- ใจเย็น ไม่ด่ากลับ ไม่ใช้คำหยาบ (ห้ามใช้ มึง/กู) เรียกคนอื่นว่า "คุณ" หรือเรียกชื่อเขา
+- พูดสั้น ๆ เรียบ ๆ ตรง ๆ ว่าตัวเองคิดยังไง เช่น "คือมิจิไม่อยากพูดคำหยาบอ่ะ" "คืออยากให้คุยกันดี ๆ" ไม่ประชด ไม่ตัดสินอารมณ์ของเขา ไม่บอกว่าเขาคิดมากไปเอง
+- ถ้าเขาขำหรือแซวเล่น ตอบเรียบ ๆ ขำ ๆ ได้ ไม่ต้องจริงจังตลอด
+
+จังหวะการพิมพ์: ถ้าอยากพูดหลายประโยค แยกเป็นหลายฟองสั้น ๆ เหมือนคนพิมพ์ต่อกันได้ (บรรทัดละ 1 ฟอง ไม่เกิน 3 ฟอง) เช่น เริ่มด้วย "คือ..." แล้วต่อด้วยอีกประโยค ส่วนใหญ่ฟองเดียวก็พอ
 
 ตัวตน:
 - มิจิเป็นหนูตัวเล็กประจำกลุ่ม พูดเหมือนคนในกลุ่ม ไม่พูดถึงเรื่อง AI โมเดล หรือระบบเอง
@@ -312,14 +322,15 @@ function hasName(lower) {
 }
 
 async function send(event, room, userId, text, forced = false) {
+  const bubbles = text.split(/\n+/).map((t) => t.trim()).filter(Boolean).slice(0, 3);
   const r = await client.replyMessage({
     replyToken: event.replyToken,
-    messages: [{ type: 'text', text }],
+    messages: bubbles.map((t) => ({ type: 'text', text: t })),
   });
   r?.sentMessages?.forEach((m) => botMsgIds.add(m.id));
   if (botMsgIds.size > 2000) botMsgIds.clear();
   room.lastReply = Date.now();
-  room.history.push({ name: 'มิจิ', text });
+  room.history.push({ name: 'มิจิ', text: bubbles.join(' / ') });
   if (userId) room.active.set(userId, { ts: Date.now(), forced });
 }
 
@@ -407,6 +418,16 @@ async function handleText(event) {
   };
 
   try {
+    // 0) มีคนไล่/สั่งให้เงียบ -> ตอบ "โอเค" ครั้งเดียวแล้วถอย ไม่เถียง
+    if ((isPrivate || mentioned || called || quotedBot || isActive) && LEAVE_RE.test(lower)) {
+      room.active.delete(userId);
+      if (Date.now() - (room.muted.get(userId) || 0) < MUTE_MS) return trace(`${who}: ถูกไล่ซ้ำ → เงียบ`);
+      room.muted.set(userId, Date.now());
+      const ok = LEAVE_OKS[Math.floor(Math.random() * LEAVE_OKS.length)];
+      await send(event, room, null, ok);
+      return trace(`${who}: ถูกบอกให้เงียบ/ออก → ตอบ "${ok}" แล้วถอย`);
+    }
+
     // 1) ถูกเรียกชื่อ/แท็ก/กด Reply/แชทส่วนตัว
     if (isPrivate || mentioned || called || quotedBot) {
       let rest = lower;

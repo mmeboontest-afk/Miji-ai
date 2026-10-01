@@ -7,6 +7,7 @@ const {
   GEMINI_API_KEY,
   GEMINI_MODEL = 'gemma-2-27b-it', // ถ้าใช้ไม่ได้ ลอง gemma-3-27b-it
   NICKNAMES = 'มิจิ,miji,miju,มิจู,ปิง,ping,หนูมิจิ',
+  ADMIN_KEY = '', // ถ้าตั้งไว้ ต้องเข้า /errors?key=ค่านี้
   PORT = 3000,
 } = process.env;
 
@@ -22,6 +23,15 @@ const COOLDOWN_MS = 20000; // กันพูดแทรกถี่เกิ�
 const ACTIVE_MS = 5 * 60 * 1000; // เงียบเกิน 5 นาที = เลิกคุยกับคนนี้
 
 const ACKS = ['ว่าไงคะ?', 'คะ?', 'มิจิอยู่ค่ะ มีอะไรเหรอคะ', 'ว่าไงคะ ฟังอยู่นะ', 'คะ มีอะไรให้ช่วยไหมคะ'];
+
+const errorLog = []; // เก็บ error ล่าสุด 50 รายการ ดูได้ที่ /errors
+function logError(where, e) {
+  let msg = String((e && e.message) || e);
+  if (GEMINI_API_KEY) msg = msg.split(GEMINI_API_KEY).join('***');
+  console.error(`[${where}]`, msg);
+  errorLog.unshift({ time: new Date().toISOString(), where, msg });
+  if (errorLog.length > 50) errorLog.pop();
+}
 
 const rooms = new Map(); // roomId -> { history, count, lastReply, active: Map(userId->ts), members: Map(userId->name) }
 const botMsgIds = new Set(); // id ข้อความของบอท ไว้ดูว่าใครกด Reply มาหา
@@ -159,12 +169,24 @@ async function handleEvent(event) {
     );
     if (reply && !reply.toUpperCase().startsWith('SKIP')) await send(event, room, null, reply);
   } catch (e) {
-    console.error(e.message);
+    logError('gemini/line', e); // เงียบในไลน์ ส่ง error ไปที่หน้าเว็บแทน
   }
 }
 
 const app = express();
 app.get('/', (_, res) => res.send('Miji is awake 🐭'));
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+app.get('/errors', (req, res) => {
+  if (ADMIN_KEY && req.query.key !== ADMIN_KEY) return res.status(401).send('unauthorized');
+  if (req.query.format === 'json') return res.json(errorLog);
+  const rows = errorLog
+    .map((e) => `<tr><td>${esc(e.time)}</td><td>${esc(e.where)}</td><td>${esc(e.msg)}</td></tr>`)
+    .join('');
+  res.send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Miji errors</title><style>body{font-family:sans-serif;padding:12px}td,th{border:1px solid #ccc;padding:6px;vertical-align:top;word-break:break-word}table{border-collapse:collapse;width:100%}</style>
+<h2>🐭 Miji errors (${errorLog.length})</h2>
+<table><tr><th>เวลา</th><th>ที่ไหน</th><th>ข้อความ</th></tr>${rows || '<tr><td colspan=3>ยังไม่มี error 🎉</td></tr>'}</table>`);
+});
 app.post('/webhook', line.middleware({ channelSecret: LINE_CHANNEL_SECRET }), (req, res) => {
   Promise.all(req.body.events.map(handleEvent)).then(() => res.sendStatus(200));
 });
